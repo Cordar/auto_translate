@@ -1,0 +1,26 @@
+# Entorno virtual
+venv/
+env/
+ENV/
+
+# Archivos Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Archivos de traducción generados
+*_en.po
+*_es.po
+*_*.po
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
