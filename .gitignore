@@ -25,3 +25,8 @@ __pycache__/
 # Sistema operativo
 .DS_Store
 Thumbs.db
+
+# Ejecutable generado con PyInstaller
+build/
+dist/
+*.spec

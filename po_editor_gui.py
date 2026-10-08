@@ -5,9 +5,17 @@ Editor GUI para archivos .po
 Permite editar traducciones, pretraducir con DeepL/Google, y copiar traducciones existentes.
 """
 
+import os
+import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import polib
+
+# Un .exe sin consola deja stdout/stderr a None y print() rompe el programa.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 from pathlib import Path
 from deep_translator import DeeplTranslator, GoogleTranslator, MyMemoryTranslator
 import threading
@@ -174,6 +182,12 @@ class POEditorGUI:
         # Botones de acciones
         ttk.Button(actions_frame, text="Pretraducir vacías", 
                    command=self.pretranslate_all).pack(fill=tk.X, pady=2)
+        self.inconsistency_button = ttk.Button(
+            actions_frame,
+            text="Inconsistencias (0)",
+            command=self.show_inconsistencies,
+        )
+        self.inconsistency_button.pack(fill=tk.X, pady=2)
         
         copy_frame = ttk.Frame(actions_frame)
         copy_frame.pack(fill=tk.X, pady=5)
@@ -183,12 +197,17 @@ class POEditorGUI:
                        value="identical").pack(side=tk.LEFT, padx=5, pady=3)
         ttk.Radiobutton(copy_frame, text="Similares", variable=self.copy_mode_var, 
                        value="similar").pack(side=tk.LEFT, padx=5, pady=3)
+        ttk.Radiobutton(copy_frame, text="A revisar", variable=self.copy_mode_var, 
+                       value="to_review").pack(side=tk.LEFT, padx=5, pady=3)
+        
+        copy_actions = ttk.Frame(actions_frame)
+        copy_actions.pack(fill=tk.X, pady=2)
         
         self.copy_mark_review_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(copy_frame, text="Marcar como 'a revisar'", 
+        ttk.Checkbutton(copy_actions, text="Marcar como 'a revisar'", 
                        variable=self.copy_mark_review_var).pack(side=tk.LEFT, padx=5, pady=3)
         
-        ttk.Button(copy_frame, text="Copiar Traducciones", 
+        ttk.Button(copy_actions, text="Copiar Traducciones", 
                   command=self.copy_translations).pack(side=tk.LEFT, padx=5, pady=5, ipady=3)
         
         # Lista de entradas
@@ -341,6 +360,8 @@ class POEditorGUI:
         if not self.entries:
             self.translated_count_label.config(text="0/0")
             self.review_count_label.config(text="0/0")
+            if hasattr(self, "inconsistency_button"):
+                self.inconsistency_button.config(text="Inconsistencias (0)")
             return
         
         total = len(self.entries)
@@ -368,6 +389,10 @@ class POEditorGUI:
             self.translated_count_label.config(foreground="blue")
         else:
             self.translated_count_label.config(foreground="red")
+        
+        if hasattr(self, "inconsistency_button"):
+            conflict_count = len(self._inconsistent_groups())
+            self.inconsistency_button.config(text=f"Inconsistencias ({conflict_count})")
         
         if needs_review == 0:
             self.review_count_label.config(foreground="green")
@@ -1049,6 +1074,340 @@ class POEditorGUI:
             return any(str(value or "").strip() for value in entry.msgstr_plural.values())
         return bool(str(entry.msgstr or "").strip())
 
+    def _translation_snapshot(self, entry):
+        """Texto traducido, para saber si una copia ha cambiado la entrada."""
+        if entry.msgid_plural:
+            return tuple(sorted(
+                (idx, str(text or "")) for idx, text in entry.msgstr_plural.items()
+            ))
+        return str(entry.msgstr or "")
+
+    def _translation_key(self, entry):
+        """Clave para comparar traducciones. None si la entrada no tiene texto."""
+        if not self._has_translation_text(entry):
+            return None
+        if entry.msgid_plural:
+            return ("plural", tuple(
+                (idx, str(text or "").strip())
+                for idx, text in sorted(entry.msgstr_plural.items())
+            ))
+        return ("singular", str(entry.msgstr or "").strip())
+
+    def _inconsistent_groups(self):
+        """MsgId repetidos que tienen más de una traducción distinta."""
+        by_msgid: Dict[str, List[int]] = {}
+        for index, entry in enumerate(self.entries):
+            if entry.msgid:
+                by_msgid.setdefault(entry.msgid, []).append(index)
+        groups = []
+        for msgid, indices in by_msgid.items():
+            variants: Dict[tuple, List[int]] = {}
+            for index in indices:
+                key = self._translation_key(self.entries[index])
+                if key is None:
+                    continue
+                variants.setdefault(key, []).append(index)
+            if len(variants) < 2:
+                continue
+            groups.append({
+                "msgid": msgid,
+                "indices": indices,
+                "variants": [
+                    {"source_index": members[0], "indices": members}
+                    for members in variants.values()
+                ],
+            })
+        return groups
+
+    def _remember_review(self, index: int):
+        if index not in self.entry_metadata:
+            self.entry_metadata[index] = {}
+        self.entry_metadata[index]["needs_review"] = True
+
+    def _propagate_to_same_msgid(self, source_index: int, only_empty: bool = False) -> int:
+        """Copia la traducción de una entrada al resto con el mismo msgid."""
+        if source_index < 0 or source_index >= len(self.entries):
+            return 0
+        source = self.entries[source_index]
+        if not source.msgid or not self._has_translation_text(source):
+            return 0
+        source_key = self._translation_key(source)
+        speaker = self.extract_speaker_from_metadata(source) or ""
+        copied = 0
+        for index, entry in enumerate(self.entries):
+            if index == source_index or entry.msgid != source.msgid:
+                continue
+            has_text = self._has_translation_text(entry)
+            if only_empty and has_text:
+                continue
+            if has_text and self._translation_key(entry) == source_key:
+                continue
+            self._apply_copied_translation(entry, source)
+            if index not in self.entry_metadata:
+                self.entry_metadata[index] = {}
+            self.entry_metadata[index]["copied_from"] = {
+                "index": source_index,
+                "speaker": speaker,
+            }
+            copied += 1
+        return copied
+
+    def _translation_preview(self, entry, limit: int = 160) -> str:
+        if entry.msgid_plural:
+            lines = [
+                f"[{idx}]: {text}"
+                for idx, text in sorted(entry.msgstr_plural.items())
+                if str(text or "").strip()
+            ]
+            text = " | ".join(lines)
+        else:
+            text = str(entry.msgstr or "").strip()
+        text = " ".join(text.split())
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def show_inconsistencies(self):
+        """Vista para elegir una traducción cuando el mismo MsgId tiene varias."""
+        if not self.entries:
+            messagebox.showinfo("Inconsistencias", "No hay archivo cargado.")
+            return
+        existing = getattr(self, "inconsistency_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            self._refresh_inconsistency_view()
+            return
+        
+        window = tk.Toplevel(self.root)
+        window.title("Mismo texto, traducciones distintas")
+        window.geometry("980x680")
+        window.transient(self.root)
+        self.inconsistency_window = window
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+        
+        ttk.Label(
+            window,
+            text="Elige la traducción buena. Se copiará en todas las entradas con el mismo texto original, incluidas las que estén vacías.",
+            wraplength=940,
+        ).pack(fill=tk.X, padx=10, pady=(10, 4))
+        
+        paned = ttk.PanedWindow(window, orient=tk.HORIZONTAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=10, pady=8)
+        
+        left = ttk.Frame(paned)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=1)
+        paned.add(right, weight=2)
+        
+        columns = ("variantes", "entradas", "msgid")
+        self.inconsistency_tree = ttk.Treeview(left, columns=columns, show="headings", height=18)
+        self.inconsistency_tree.heading("variantes", text="Variantes")
+        self.inconsistency_tree.heading("entradas", text="Entradas")
+        self.inconsistency_tree.heading("msgid", text="MsgId")
+        self.inconsistency_tree.column("variantes", width=80, stretch=False)
+        self.inconsistency_tree.column("entradas", width=80, stretch=False)
+        self.inconsistency_tree.column("msgid", width=280)
+        tree_scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.inconsistency_tree.yview)
+        self.inconsistency_tree.configure(yscrollcommand=tree_scroll.set)
+        self.inconsistency_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.inconsistency_tree.bind("<<TreeviewSelect>>", self._on_inconsistency_group_select)
+        
+        ttk.Label(right, text="Texto original").pack(anchor=tk.W)
+        self.inconsistency_msgid = scrolledtext.ScrolledText(right, height=5, wrap=tk.WORD, state=tk.DISABLED)
+        self.inconsistency_msgid.pack(fill=tk.X, pady=(0, 8))
+        
+        ttk.Label(right, text="Traducciones distintas").pack(anchor=tk.W)
+        self.inconsistency_variants = tk.Listbox(right, height=6, activestyle="dotbox")
+        self.inconsistency_variants.pack(fill=tk.X, pady=(0, 6))
+        self.inconsistency_variants.bind("<<ListboxSelect>>", self._on_inconsistency_variant_select)
+        
+        self.inconsistency_variant_text = scrolledtext.ScrolledText(right, height=8, wrap=tk.WORD, state=tk.DISABLED)
+        self.inconsistency_variant_text.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        
+        self.inconsistency_entries_label = ttk.Label(right, text="", wraplength=560)
+        self.inconsistency_entries_label.pack(anchor=tk.W, pady=(0, 6))
+        
+        actions = ttk.Frame(right)
+        actions.pack(fill=tk.X)
+        ttk.Button(actions, text="Ver entrada", command=self._show_selected_inconsistency_entry).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(
+            actions,
+            text="Usar esta traducción en todas",
+            command=self._apply_selected_inconsistency,
+        ).pack(side=tk.LEFT)
+        
+        self._refresh_inconsistency_view()
+
+    def _refresh_inconsistency_view(self):
+        window = getattr(self, "inconsistency_window", None)
+        if window is None or not window.winfo_exists():
+            self.update_statistics()
+            return
+        self._inconsistency_groups_cache = self._inconsistent_groups()
+        self.inconsistency_tree.delete(*self.inconsistency_tree.get_children())
+        for position, group in enumerate(self._inconsistency_groups_cache):
+            preview = group["msgid"].replace("\n", " ")
+            if len(preview) > 80:
+                preview = preview[:80] + "..."
+            self.inconsistency_tree.insert(
+                "",
+                tk.END,
+                iid=str(position),
+                values=(len(group["variants"]), len(group["indices"]), preview),
+            )
+        self._clear_inconsistency_detail()
+        if self._inconsistency_groups_cache:
+            first = self.inconsistency_tree.get_children()[0]
+            self.inconsistency_tree.selection_set(first)
+            self.inconsistency_tree.focus(first)
+            self._on_inconsistency_group_select(None)
+        else:
+            self.inconsistency_entries_label.config(
+                text="No hay textos originales con traducciones distintas."
+            )
+        self.update_statistics()
+
+    def _clear_inconsistency_detail(self):
+        self.inconsistency_msgid.config(state=tk.NORMAL)
+        self.inconsistency_msgid.delete(1.0, tk.END)
+        self.inconsistency_msgid.config(state=tk.DISABLED)
+        self.inconsistency_variants.delete(0, tk.END)
+        self.inconsistency_variant_text.config(state=tk.NORMAL)
+        self.inconsistency_variant_text.delete(1.0, tk.END)
+        self.inconsistency_variant_text.config(state=tk.DISABLED)
+        self.inconsistency_entries_label.config(text="")
+
+    def _selected_inconsistency_group(self):
+        selection = self.inconsistency_tree.selection()
+        if not selection:
+            return None
+        position = int(selection[0])
+        groups = getattr(self, "_inconsistency_groups_cache", [])
+        if position < 0 or position >= len(groups):
+            return None
+        return groups[position]
+
+    def _selected_inconsistency_variant(self):
+        group = self._selected_inconsistency_group()
+        if group is None:
+            return None, None
+        selection = self.inconsistency_variants.curselection()
+        if not selection:
+            return group, None
+        variant_index = selection[0]
+        if variant_index >= len(group["variants"]):
+            return group, None
+        return group, group["variants"][variant_index]
+
+    def _on_inconsistency_group_select(self, event):
+        group = self._selected_inconsistency_group()
+        self._clear_inconsistency_detail()
+        if group is None:
+            return
+        self.inconsistency_msgid.config(state=tk.NORMAL)
+        self.inconsistency_msgid.insert(1.0, group["msgid"])
+        self.inconsistency_msgid.config(state=tk.DISABLED)
+        for variant in group["variants"]:
+            entry = self.entries[variant["source_index"]]
+            preview = self._translation_preview(entry)
+            self.inconsistency_variants.insert(
+                tk.END,
+                f"{len(variant['indices'])} entradas — {preview}",
+            )
+        self.inconsistency_variants.selection_set(0)
+        self._on_inconsistency_variant_select(None)
+
+    def _on_inconsistency_variant_select(self, event):
+        group, variant = self._selected_inconsistency_variant()
+        self.inconsistency_variant_text.config(state=tk.NORMAL)
+        self.inconsistency_variant_text.delete(1.0, tk.END)
+        if variant is None:
+            self.inconsistency_variant_text.config(state=tk.DISABLED)
+            self.inconsistency_entries_label.config(text="")
+            return
+        source = self.entries[variant["source_index"]]
+        if source.msgid_plural:
+            lines = [f"[{idx}]: {text}" for idx, text in sorted(source.msgstr_plural.items())]
+            shown = "\n".join(lines)
+        else:
+            shown = str(source.msgstr or "")
+        self.inconsistency_variant_text.insert(1.0, shown)
+        self.inconsistency_variant_text.config(state=tk.DISABLED)
+        numbers = ", ".join(f"#{index + 1}" for index in variant["indices"][:12])
+        if len(variant["indices"]) > 12:
+            numbers += f" y {len(variant['indices']) - 12} más"
+        self.inconsistency_entries_label.config(text=f"Entradas con esta traducción: {numbers}")
+
+    def _show_selected_inconsistency_entry(self):
+        _group, variant = self._selected_inconsistency_variant()
+        if variant is None:
+            return
+        self._select_entry_by_index(variant["source_index"])
+
+    def _select_entry_by_index(self, index: int):
+        if index < 0 or index >= len(self.entries):
+            return
+        for item in self.entries_tree.get_children():
+            values = self.entries_tree.item(item)["values"]
+            if values and int(values[0]) - 1 == index:
+                self.entries_tree.selection_set(item)
+                self.entries_tree.see(item)
+                self.on_entry_select(None)
+                return
+        self.current_entry_index = index
+        self.display_entry(self.entries[index])
+
+    def _apply_selected_inconsistency(self):
+        _group, variant = self._selected_inconsistency_variant()
+        if variant is None:
+            messagebox.showwarning("Inconsistencias", "Elige una traducción.", parent=self.inconsistency_window)
+            return
+        source_index = variant["source_index"]
+        msgid = self.entries[source_index].msgid
+        others = sum(1 for entry in self.entries if entry.msgid == msgid) - 1
+        if others <= 0:
+            return
+        confirmed = messagebox.askyesno(
+            "Aplicar traducción",
+            f"Se copiará esta traducción en las otras {others} entradas con el mismo texto original.\n\n"
+            "Las que ya tenían otra traducción quedarán igual que esta.",
+            parent=self.inconsistency_window,
+        )
+        if not confirmed:
+            return
+        copied = self._propagate_to_same_msgid(source_index, only_empty=False)
+        self.has_unsaved_changes = True
+        self.update_window_title()
+        self.update_entries_list()
+        self._refresh_current_entry_display()
+        self.status_bar.config(text=f"Traducción unificada en {copied} entradas")
+        self._refresh_inconsistency_view()
+
+    def _apply_copied_translation(self, entry, source_entry):
+        """Copia el texto traducido de una entrada a otra."""
+        if not entry.msgid_plural:
+            if source_entry.msgid_plural:
+                text = source_entry.msgstr_plural.get(0) or source_entry.msgstr or ""
+            else:
+                text = source_entry.msgstr or ""
+            entry.msgstr = str(text)
+            return
+        entry.msgstr = ""
+        source_plurals = dict(source_entry.msgstr_plural) if source_entry.msgid_plural else {}
+        if not source_plurals and str(source_entry.msgstr or "").strip():
+            source_plurals = {0: str(source_entry.msgstr)}
+        if not entry.msgstr_plural:
+            entry.msgstr_plural[0] = str(source_plurals.get(0, ""))
+            entry.msgstr_plural[1] = str(source_plurals.get(1, source_plurals.get(0, "")))
+        else:
+            for idx in list(entry.msgstr_plural.keys()):
+                if idx in source_plurals:
+                    entry.msgstr_plural[idx] = str(source_plurals[idx] or "")
+                elif source_plurals:
+                    fallback = source_plurals.get(1, source_plurals.get(0, ""))
+                    entry.msgstr_plural[idx] = str(fallback or "")
+
     def _build_translator_chain(self) -> List[Tuple[str, object, Optional[int]]]:
         """Motores en orden: DeepL (si hay clave), Google y MyMemory."""
         chain = []
@@ -1175,9 +1534,12 @@ class POEditorGUI:
                     if translated_text:
                         self.msgstr_text.insert(1.0, translated_text)
                     self.on_translation_changed()
-                    if translated_text.strip():
+                    copied = 0
+                    if translated_text.strip() and current_idx is not None:
+                        copied = self._propagate_to_same_msgid(current_idx, only_empty=True)
                         self._mark_entry_for_review(current_idx)
-                    self.status_bar.config(text=f"Traducción completada ({engine})")
+                    extra = f", copiada en {copied} entradas iguales" if copied else ""
+                    self.status_bar.config(text=f"Traducción completada ({engine}){extra}")
 
                 self.root.after(0, apply_translation)
             except Exception as e:
@@ -1527,6 +1889,7 @@ class POEditorGUI:
         response = messagebox.askyesno(
             "Confirmar",
             "¿Pretraducir las entradas que todavía no tienen texto?\n\n"
+            "Cada texto original se traduce una sola vez y se copia en las demás entradas vacías.\n"
             "Las que ya tienen traducción, incluidas las fuzzy, no se modifican.\n"
             "Puede tardar varios minutos."
         )
@@ -1553,30 +1916,42 @@ class POEditorGUI:
             engines_used = set()
             translated_count = 0
             error_count = 0
-            
+            pending_by_msgid: Dict[str, List[int]] = {}
             for i, entry in enumerate(self.entries):
-                if self._has_translation_text(entry) or not entry.msgid:
-                    continue
+                if entry.msgid and not self._has_translation_text(entry):
+                    pending_by_msgid.setdefault(entry.msgid, []).append(i)
+            
+            for msgid, indices in pending_by_msgid.items():
                 try:
-                    singular, engine = self._translate_text(entry.msgid, chain, disabled)
-                    plural = None
-                    if entry.msgid_plural:
-                        plural, plural_engine = self._translate_text(entry.msgid_plural, chain, disabled)
-                        engines_used.add(plural_engine)
-                    if singular and singular.strip():
+                    existing = next(
+                        (
+                            index for index, entry in enumerate(self.entries)
+                            if entry.msgid == msgid and self._has_translation_text(entry)
+                        ),
+                        None,
+                    )
+                    if existing is None:
+                        entry = self.entries[indices[0]]
+                        singular, engine = self._translate_text(entry.msgid, chain, disabled)
+                        plural = None
+                        if entry.msgid_plural:
+                            plural, plural_engine = self._translate_text(entry.msgid_plural, chain, disabled)
+                            engines_used.add(plural_engine)
+                        if not singular or not singular.strip():
+                            continue
                         self._store_translation(entry, singular, plural)
                         engines_used.add(engine)
-                        if i not in self.entry_metadata:
-                            self.entry_metadata[i] = {}
-                        self.entry_metadata[i]['needs_review'] = True
-                        translated_count += 1
-
+                        existing = indices[0]
+                    self._propagate_to_same_msgid(existing, only_empty=True)
+                    for index in indices:
+                        self._remember_review(index)
+                    translated_count += len(indices)
                     if translated_count and translated_count % 10 == 0:
                         self.root.after(0, lambda count=translated_count: self.status_bar.config(
                             text=f"Pretraduciendo... {count} traducidas"))
                 except Exception as e:
                     error_count += 1
-                    print(f"Error traduciendo entrada {i}: {str(e)}")
+                    print(f"Error traduciendo '{msgid[:40]}': {str(e)}")
             
             self.root.after(0, self.update_entries_list)
             self.root.after(0, lambda: setattr(self, 'has_unsaved_changes', True))
@@ -1685,8 +2060,61 @@ class POEditorGUI:
                     
                     # Actualizar progreso cada 10 entradas
                     if copied_count % 10 == 0:
-                        self.root.after(0, lambda: self.status_bar.config(
-                            text=f"Copiando traducciones... {copied_count} copiadas"))
+                        self.root.after(0, lambda count=copied_count: self.status_bar.config(
+                            text=f"Copiando traducciones... {count} copiadas"))
+            
+            elif mode == "to_review":
+                # Copia la traducción ya aceptada a las marcadas a revisar con el mismo msgid.
+                msgid_groups: Dict[str, List[Dict]] = {}
+                for idx, entry in enumerate(self.entries):
+                    if not entry.msgid:
+                        continue
+                    msgid_groups.setdefault(entry.msgid, []).append({
+                        'index': idx,
+                        'entry': entry,
+                    })
+                
+                for group in msgid_groups.values():
+                    source_item = None
+                    for item in group:
+                        entry = item['entry']
+                        needs_review = self.entry_metadata.get(item['index'], {}).get('needs_review', False)
+                        if not needs_review and self._has_translation_text(entry):
+                            source_item = item
+                            break
+                    if source_item is None:
+                        continue
+                    
+                    source_entry = source_item['entry']
+                    source_index = source_item['index']
+                    source_speaker = self.extract_speaker_from_metadata(source_entry)
+                    for item in group:
+                        if item['index'] == source_index:
+                            continue
+                        needs_review = self.entry_metadata.get(item['index'], {}).get('needs_review', False)
+                        if not needs_review:
+                            continue
+                        entry = item['entry']
+                        before = self._translation_snapshot(entry)
+                        self._apply_copied_translation(entry, source_entry)
+                        changed = before != self._translation_snapshot(entry)
+                        idx = item['index']
+                        if idx not in self.entry_metadata:
+                            self.entry_metadata[idx] = {}
+                        self.entry_metadata[idx]['copied_from'] = {
+                            'index': source_index,
+                            'speaker': source_speaker or ''
+                        }
+                        if mark_for_review:
+                            self.entry_metadata[idx]['needs_review'] = True
+                        elif 'needs_review' in self.entry_metadata[idx]:
+                            del self.entry_metadata[idx]['needs_review']
+                            changed = True
+                        if changed:
+                            copied_count += 1
+                            if copied_count % 10 == 0:
+                                self.root.after(0, lambda count=copied_count: self.status_bar.config(
+                                    text=f"Copiando traducciones... {count} copiadas"))
             
             else:  # similar
                 # Crear índice de traducciones existentes con información completa
@@ -1761,18 +2189,28 @@ class POEditorGUI:
             # Actualizar display de entrada actual si está seleccionada
             self.root.after(0, lambda: self._refresh_current_entry_display())
             
-            self.root.after(0, lambda: self.status_bar.config(
-                text=f"Copia completada: {copied_count} traducciones copiadas"))
+            status = f"Copia completada: {copied_count} traducciones copiadas"
+            self.root.after(0, lambda text=status: self.status_bar.config(text=text))
             review_text = "y marcadas como 'a revisar'" if mark_for_review else ""
             
-            # Construir mensaje con información adicional
-            message = f"Se copiaron {copied_count} traducciones."
-            if mark_for_review:
-                message += f"\nTodas han sido {review_text}."
-            if available_count > 0:
-                message += f"\n\nDe las entradas sin traducir, {available_count} tienen otra entrada con el mismo MsgId que sí está traducida."
+            if mode == "to_review":
+                message = (
+                    f"Se actualizaron {copied_count} entradas marcadas a revisar "
+                    "con la traducción de otra entrada que tiene el mismo texto original."
+                )
+                if not mark_for_review:
+                    message += "\nEsas entradas dejan de estar marcadas a revisar."
+            else:
+                message = f"Se copiaron {copied_count} traducciones."
+                if mark_for_review:
+                    message += f"\nTodas han sido {review_text}."
+                if available_count > 0:
+                    message += (
+                        f"\n\nDe las entradas sin traducir, {available_count} tienen otra "
+                        "entrada con el mismo MsgId que sí está traducida."
+                    )
             
-            self.root.after(0, lambda: messagebox.showinfo("Completado", message))
+            self.root.after(0, lambda text=message: messagebox.showinfo("Completado", text))
         
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Error", f"Error durante la copia:\n{str(e)}"))

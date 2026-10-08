@@ -69,7 +69,7 @@ python po_editor_gui.py
 1. Pulsa **Cargar...** y elige un `.po`.
 2. Revisa **Idioma origen** e **Idioma destino**. Si la cabecera del archivo tiene `Language`, o el nombre termina en un código (`messages_es.po`), el destino se selecciona solo. Si no se reconoce, el programa pregunta.
 3. Elige una entrada en la lista. El texto original está a la derecha y no se edita. La traducción sí.
-4. Escribe la traducción, o pulsa **Traducir esta entrada**.
+4. Escribe la traducción, o pulsa **Traducir esta entrada**. Si hay otras entradas vacías con el mismo texto original, reciben esa misma traducción.
 5. **Guardar** sobrescribe el archivo abierto. **Guardar como...** escribe otro. Un asterisco en el título de la ventana indica cambios sin guardar. Al salir o al abrir otro archivo, pregunta si quieres guardarlos.
 
 La lista se ordena por la ruta que aparece en las referencias de cada entrada.
@@ -80,13 +80,16 @@ Filtros de la lista:
 - **Solo sin traducir**
 - **Solo a revisar**
 
-**Pretraducir vacías** traduce las entradas que no tienen texto. No modifica las que ya tienen traducción, incluidas las marcadas `fuzzy`.
+**Pretraducir vacías** traduce las entradas que no tienen texto. Cada texto original se traduce una sola vez y esa traducción se copia en las demás entradas vacías con el mismo msgid. No modifica las que ya tienen traducción, incluidas las marcadas `fuzzy`.
+
+**Inconsistencias** abre los textos originales que tienen traducciones distintas. Ahí se elige la buena y se copia en todas las entradas con ese mismo texto, también en las que estaban vacías.
 
 **Copiar traducciones**:
 
 - **Idénticas**: mismo msgid. Copia la primera traducción con texto al resto de entradas iguales que estén vacías.
 - **Similares**: msgid parecido al menos en un 80 %.
-- **Marcar como 'a revisar'**: deja esas copias pendientes. Puedes desmarcarla si quieres copiarlas como definitivas.
+- **A revisar**: mismo msgid. Copia la traducción de una entrada ya traducida (que no esté a revisar) encima de las que sí están marcadas a revisar.
+- **Marcar como 'a revisar'**: deja esas copias pendientes. Si está desmarcada, **A revisar** les quita esa marca al copiar.
 
 Las traducciones automáticas quedan marcadas como **a revisar**. Esa marca, y de qué entrada se copió un texto, se guarda en un comentario del traductor que empieza por `POEDITOR_METADATA:`. Si borras ese comentario, el editor olvida la marca al volver a abrir el archivo.
 
@@ -133,9 +136,20 @@ MyMemory no pide clave. Cada texto puede tener como máximo 500 caracteres. Un t
 
 La barra de estado dice qué motor ha respondido. Al terminar una pretraducción, el aviso lista los motores usados.
 
+## Ejecutable sin Python
+
+Quien solo va a usar el editor no necesita Python si recibe la carpeta ya generada. Para crearla, en un equipo que sí tenga Python y haya ejecutado `setup.bat`:
+
+```bat
+crear_ejecutable.bat
+```
+
+El resultado es `dist\EditorPO\EditorPO.exe`. Hay que copiar **toda** la carpeta `dist\EditorPO`, no solo el `.exe`. El programa incluye Python y las librerías; ocupa bastante (decenas de MB).
+
+El botón **Corregir** sigue necesitando Java en el equipo donde se ejecuta. Traducir sigue necesitando internet.
+
 ## Qué no hace este programa
 
 - No traduce directorios ni busca `.po` en subcarpetas.
 - No sobrescribe traducciones que ya tienen texto. Para cambiar una, edítala o pulsa **Limpiar** y vuelve a traducirla.
-- No crea `AutoTranslate.exe` ni incluye `crear_ejecutable.bat`.
-- No ofrece `po_translator.py`. El único programa es `po_editor_gui.py`.
+- No ofrece un traductor por línea de comandos. El programa es `po_editor_gui.py`, o `EditorPO.exe` si se ha generado el ejecutable.
