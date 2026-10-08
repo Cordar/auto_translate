@@ -1,193 +1,141 @@
-# Auto Translate - Traductor Automático de Archivos .po
+# Editor de archivos .po
 
-Herramienta en Python para traducir automáticamente archivos .po usando Google Translate.
+Aplicación de escritorio para Windows. Sirve para abrir un archivo gettext `.po`, revisar cada entrada y rellenar las traducciones que faltan.
 
-## Características
+Se trabaja con **un archivo cada vez**. No hay modo de línea de comandos, no traduce una carpeta entera y no genera un `.exe`.
 
-- ✅ **Interfaz gráfica** fácil de usar (GUI)
-- ✅ Traduce archivos .po completos automáticamente
-- ✅ Soporte para mensajes singulares y plurales
-- ✅ Procesamiento de directorios completos
-- ✅ Búsqueda recursiva en subdirectorios
-- ✅ Preserva metadatos del archivo .po
-- ✅ Estadísticas de traducción
-- ✅ Opción para sobrescribir traducciones existentes
-- ✅ Puede convertirse en ejecutable .exe
+## Requisitos
+
+- Windows
+- [Python 3.10 o superior](https://www.python.org/downloads/), con la casilla **Add python.exe to PATH** marcada. El instalador oficial incluye Tk, que es la interfaz gráfica.
+- Internet, para traducir.
+- Java (por ejemplo OpenJDK), solo para el botón **Corregir**. Sin Java el resto del editor funciona.
+- Opcional: una clave de [DeepL](https://www.deepl.com/pro-api). Las claves gratuitas terminan en `:fx`.
+
+El proyecto usa `polib`, `deep-translator` y `language-tool-python` (ver `requirements.txt`).
 
 ## Instalación
 
-### Opción 1: Script Automático (Recomendado)
+Abre una terminal en esta carpeta.
 
-**Windows (PowerShell):**
+CMD, o doble clic en el archivo:
+
+```bat
+setup.bat
+```
+
+PowerShell:
+
 ```powershell
 .\setup.ps1
 ```
 
-**Windows (CMD):**
-```cmd
-setup.bat
+Si PowerShell bloquea el script, permite los scripts locales de tu usuario y vuelve a lanzarlo:
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 ```
 
-### Opción 2: Manual
+Eso crea la carpeta `venv` e instala las dependencias. Si ya existe un entorno en `.venv`, los lanzadores lo usan; `setup` no lo modifica y crea `venv` si falta.
 
-1. **Instala Python** (si no lo tienes):
-   - Descarga desde: https://www.python.org/downloads/
-   - Asegúrate de marcar "Add Python to PATH" durante la instalación
+## Abrir el editor
 
-2. **Crea un entorno virtual:**
-```bash
-python -m venv venv
+Doble clic en `ejecutar_editor.bat`.
+
+En PowerShell:
+
+```powershell
+.\ejecutar_editor.ps1
 ```
 
-3. **Activa el entorno virtual:**
+Para dejar el entorno activo y lanzar el editor a mano:
 
-   **Windows (PowerShell):**
-   ```powershell
-   .\venv\Scripts\Activate.ps1
-   ```
-   
-   **Windows (CMD):**
-   ```cmd
-   venv\Scripts\activate.bat
-   ```
+CMD:
 
-4. **Instala las dependencias:**
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
+```bat
+activar_venv.bat
+python po_editor_gui.py
+```
+
+PowerShell (el punto inicial es necesario):
+
+```powershell
+. .\activar_venv.ps1
+python po_editor_gui.py
 ```
 
 ## Uso
 
-### Opción 1: Interfaz Gráfica (Recomendado para usuarios)
+1. Pulsa **Cargar...** y elige un `.po`.
+2. Revisa **Idioma origen** e **Idioma destino**. Si la cabecera del archivo tiene `Language`, o el nombre termina en un código (`messages_es.po`), el destino se selecciona solo. Si no se reconoce, el programa pregunta.
+3. Elige una entrada en la lista. El texto original está a la derecha y no se edita. La traducción sí.
+4. Escribe la traducción, o pulsa **Traducir esta entrada**.
+5. **Guardar** sobrescribe el archivo abierto. **Guardar como...** escribe otro. Un asterisco en el título de la ventana indica cambios sin guardar. Al salir o al abrir otro archivo, pregunta si quieres guardarlos.
 
-**Ejecutar la GUI:**
+La lista se ordena por la ruta que aparece en las referencias de cada entrada.
 
-**Windows (PowerShell):**
-```powershell
-.\ejecutar_gui.ps1
+Filtros de la lista:
+
+- texto que debe aparecer en el msgid
+- **Solo sin traducir**
+- **Solo a revisar**
+
+**Pretraducir vacías** traduce las entradas que no tienen texto. No modifica las que ya tienen traducción, incluidas las marcadas `fuzzy`.
+
+**Copiar traducciones**:
+
+- **Idénticas**: mismo msgid. Copia la primera traducción con texto al resto de entradas iguales que estén vacías.
+- **Similares**: msgid parecido al menos en un 80 %.
+- **Marcar como 'a revisar'**: deja esas copias pendientes. Puedes desmarcarla si quieres copiarlas como definitivas.
+
+Las traducciones automáticas quedan marcadas como **a revisar**. Esa marca, y de qué entrada se copió un texto, se guarda en un comentario del traductor que empieza por `POEDITOR_METADATA:`. Si borras ese comentario, el editor olvida la marca al volver a abrir el archivo.
+
+**Corregir** revisa la traducción actual con LanguageTool, en el idioma de destino. La primera vez descarga LanguageTool: hace falta Java y puede tardar. **Limpiar** borra la traducción de la entrada abierta.
+
+Si un comentario contiene `"Speaker": "Nombre"` o `"Context": "Nombre ->"`, ese nombre se muestra junto a la traducción.
+
+### Plurales
+
+Una entrada con plural se edita así:
+
+```text
+[0]: forma singular
+[1]: forma plural
 ```
 
-**Windows (CMD):**
-```cmd
-ejecutar_gui.bat
-```
+**Traducir esta entrada** y **Pretraducir vacías** rellenan `[0]` con la traducción de `msgid` y el resto de formas con la traducción de `msgid_plural`.
 
-O simplemente haz doble clic en `ejecutar_gui.bat`
+**Copiar traducciones** solo copia el campo `msgstr` de las entradas que no son plurales.
 
-La interfaz gráfica te permite:
-- Seleccionar archivos .po fácilmente
-- Elegir idiomas desde menús desplegables
-- Ver el progreso de la traducción en tiempo real
-- Ver estadísticas al finalizar
+### Idiomas
 
-### Opción 2: Línea de Comandos
+| Nombre en el menú | Código |
+| --- | --- |
+| Español | `es` |
+| Inglés | `en` |
+| Catalán | `ca` |
+| Francés | `fr` |
+| Alemán | `de` |
+| Italiano | `it` |
+| Portugués | `pt` |
 
-**Importante:** Asegúrate de tener el entorno virtual activado antes de usar la herramienta.
+### De dónde sale la traducción
 
-**Activar el entorno virtual:**
+Si hay texto en **DeepL API Key**, se intenta DeepL primero.
 
-**Windows (PowerShell):**
-```powershell
-.\activar_venv.ps1
-```
+- Clave que termina en `:fx`: API gratuita (`api-free.deepl.com`).
+- Cualquier otra clave: API de pago (`api.deepl.com`).
+- Con `deep-translator` 1.11.4, DeepL no incluye catalán. Ese idioma pasa al siguiente motor.
 
-**Windows (CMD):**
-```cmd
-activar_venv.bat
-```
+Si DeepL no está configurado o falla, se usa la página pública de Google Translate (`translate.google.com/m`), sin clave. Google responde a menudo con un bloqueo (HTTP 429 o un captcha). En ese caso el programa no se detiene: prueba MyMemory.
 
-**Traducir un archivo individual:**
+MyMemory no pide clave. Cada texto puede tener como máximo 500 caracteres. Un texto más largo necesita DeepL, o que Google no esté bloqueado.
 
-```bash
-python po_translator.py archivo.po --source en --target es
-```
+La barra de estado dice qué motor ha respondido. Al terminar una pretraducción, el aviso lista los motores usados.
 
-### Especificar archivo de salida
+## Qué no hace este programa
 
-```bash
-python po_translator.py archivo.po -o traducido.po --source en --target es
-```
-
-### Traducir todos los archivos .po en un directorio
-
-```bash
-python po_translator.py -d ./locale --source en --target es
-```
-
-### Traducir recursivamente en subdirectorios
-
-```bash
-python po_translator.py -d ./locale -r --source en --target es
-```
-
-### Sobrescribir traducciones existentes
-
-```bash
-python po_translator.py archivo.po --source en --target es --overwrite
-```
-
-## Opciones
-
-- `input`: Archivo .po de entrada o directorio
-- `-o, --output`: Archivo .po de salida (solo para archivos individuales)
-- `-d, --directory`: Directorio con archivos .po a traducir
-- `-r, --recursive`: Buscar archivos .po recursivamente en subdirectorios
-- `--source, --source-lang`: Idioma origen (código ISO 639-1, default: en)
-- `--target, --target-lang`: Idioma destino (código ISO 639-1, default: es)
-- `--overwrite`: Sobrescribir traducciones existentes
-
-## Códigos de Idioma
-
-Usa códigos ISO 639-1 de dos letras para los idiomas:
-
-- `en` - Inglés
-- `es` - Español
-- `fr` - Francés
-- `de` - Alemán
-- `it` - Italiano
-- `pt` - Portugués
-- `ru` - Ruso
-- `zh` - Chino
-- `ja` - Japonés
-- `ko` - Coreano
-- Y muchos más...
-
-## Ejemplo
-
-```bash
-# Traducir un archivo de inglés a español
-python po_translator.py messages.po --source en --target es
-
-# El archivo se guardará como messages_es.po
-```
-
-## Notas
-
-- La herramienta usa Google Translate API (gratuita) a través de la biblioteca `deep-translator`
-- Las traducciones existentes se preservan por defecto (usa `--overwrite` para sobrescribirlas)
-- Los metadatos del archivo .po se actualizan automáticamente
-- Para textos muy largos (>5000 caracteres), se dividen en partes para evitar errores
-
-## Crear Ejecutable (.exe)
-
-Si quieres crear un ejecutable independiente que no requiera Python instalado:
-
-```bash
-crear_ejecutable.bat
-```
-
-Esto creará un archivo `dist\AutoTranslate.exe` que puedes ejecutar directamente con doble clic.
-
-**Nota:** El ejecutable será más grande (~50-100 MB) porque incluye Python y todas las dependencias.
-
-## Requisitos
-
-- Python 3.6+
-- polib
-- deep-translator
-- tkinter (incluido con Python en la mayoría de instalaciones)
-
-## Licencia
-
-Este proyecto es de código abierto y está disponible para uso libre.
+- No traduce directorios ni busca `.po` en subcarpetas.
+- No sobrescribe traducciones que ya tienen texto. Para cambiar una, edítala o pulsa **Limpiar** y vuelve a traducirla.
+- No crea `AutoTranslate.exe` ni incluye `crear_ejecutable.bat`.
+- No ofrece `po_translator.py`. El único programa es `po_editor_gui.py`.

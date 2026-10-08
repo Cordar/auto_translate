@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 REM Script para configurar el entorno de desarrollo
 REM 1. Verificar Python
 REM 2. Crear entorno virtual
@@ -52,8 +53,8 @@ if %errorlevel% neq 0 (
 
 echo Entorno virtual activado.
 echo Instalando paquetes desde requirements.txt...
-pip install --upgrade pip
-pip install -r requirements.txt
+venv\Scripts\python.exe -m pip install --upgrade pip
+venv\Scripts\python.exe -m pip install -r requirements.txt
 
 if %errorlevel% neq 0 (
     echo ERROR: No se pudieron instalar las dependencias
@@ -66,8 +67,8 @@ echo ========================================
 echo Configuracion completada exitosamente!
 echo ========================================
 echo.
-echo Para usar el entorno virtual en el futuro:
-echo   1. Ejecuta: venv\Scripts\activate.bat
-echo   2. Luego puedes usar: python po_translator.py ...
+echo Para abrir el editor:
+echo   ejecutar_editor.bat
+echo   o, en PowerShell: .\ejecutar_editor.ps1
 echo.
 pause

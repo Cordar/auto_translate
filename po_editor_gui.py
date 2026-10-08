@@ -9,9 +9,9 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import polib
 from pathlib import Path
-from deep_translator import DeeplTranslator, GoogleTranslator
+from deep_translator import DeeplTranslator, GoogleTranslator, MyMemoryTranslator
 import threading
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 import json
 import re
 from difflib import SequenceMatcher
@@ -41,12 +41,25 @@ class POEditorGUI:
         # Idiomas disponibles
         self.languages = {
             "Español": "es",
-            "Inglés": "en-GB",
+            "Inglés": "en",
             "Catalán": "ca",
             "Francés": "fr",
             "Alemán": "de",
             "Italiano": "it",
             "Portugués": "pt"
+        }
+        # Cada motor acepta códigos distintos. deep-translator 1.11.4 no incluye catalán en DeepL.
+        self.engine_lang_codes = {
+            "deepl": {
+                "es": "es", "en": "en", "fr": "fr", "de": "de", "it": "it", "pt": "pt"
+            },
+            "google": {
+                "es": "es", "en": "en", "ca": "ca", "fr": "fr", "de": "de", "it": "it", "pt": "pt"
+            },
+            "mymemory": {
+                "es": "es-ES", "en": "en-GB", "ca": "ca-ES", "fr": "fr-FR",
+                "de": "de-DE", "it": "it-IT", "pt": "pt-PT"
+            },
         }
         
         # Mapeo inverso: código de idioma -> nombre
@@ -54,7 +67,7 @@ class POEditorGUI:
         # Agregar variantes comunes
         self.lang_code_to_name.update({
             "en": "Inglés",
-            "en-US": "Inglés",
+            "en-GB": "Inglés",
             "en-US": "Inglés",
             "es-ES": "Español",
             "es-MX": "Español",
@@ -70,27 +83,18 @@ class POEditorGUI:
         })
         
         self.source_lang = "es"
-        self.target_lang = "en-GB"
+        self.target_lang = "en"
         
         # Mapeo de idiomas a códigos de LanguageTool
         self.language_tool_codes = {
             "es": "es",
-            "en-GB": "en-GB",
+            "en": "en-GB",
             "ca": "ca",
             "fr": "fr",
             "de": "de-DE",
             "it": "it",
             "pt": "pt-PT"
         }
-        
-        # Inicializar LanguageTool si está disponible
-        self.language_tool = None
-        if LANGUAGE_TOOL_AVAILABLE:
-            try:
-                self.language_tool = language_tool_python.LanguageTool('ca')  # Por defecto catalán
-            except Exception as e:
-                print(f"Error inicializando LanguageTool: {e}")
-                self.language_tool = None
         
         # Configurar cierre de ventana
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -168,7 +172,7 @@ class POEditorGUI:
         ttk.Entry(deepl_frame, textvariable=self.deepl_key_var, width=30, show="*").pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         
         # Botones de acciones
-        ttk.Button(actions_frame, text="Pretraducir (DeepL/Google)", 
+        ttk.Button(actions_frame, text="Pretraducir vacías", 
                    command=self.pretranslate_all).pack(fill=tk.X, pady=2)
         
         copy_frame = ttk.Frame(actions_frame)
@@ -276,7 +280,7 @@ class POEditorGUI:
         entry_actions = ttk.Frame(right_frame)
         entry_actions.pack(fill=tk.X, padx=5, pady=5)
         
-        ttk.Button(entry_actions, text="Traducir (DeepL/Google)", 
+        ttk.Button(entry_actions, text="Traducir esta entrada", 
                   command=self.translate_current).pack(side=tk.LEFT, padx=5)
         ttk.Button(entry_actions, text="Corregir", 
                   command=self.correct_current).pack(side=tk.LEFT, padx=5)
@@ -380,7 +384,7 @@ class POEditorGUI:
     def update_target_lang(self):
         """Actualiza el idioma destino"""
         lang_name = self.target_combo.get()
-        self.target_lang = self.languages.get(lang_name, "en-GB")
+        self.target_lang = self.languages.get(lang_name, "en")
     
     def copy_msgid_to_clipboard(self):
         """Copia el msgid actual al portapapeles"""
@@ -510,7 +514,7 @@ class POEditorGUI:
                 if not detected_target:
                     # Mapear códigos comunes
                     lang_map = {
-                        'es': 'es', 'en': 'en-GB', 'ca': 'ca', 'fr': 'fr',
+                        'es': 'es', 'en': 'en', 'ca': 'ca', 'fr': 'fr',
                         'de': 'de', 'it': 'it', 'pt': 'pt'
                     }
                     detected_target = lang_map.get(lang_code, None)
@@ -1039,8 +1043,103 @@ class POEditorGUI:
         self.has_unsaved_changes = True
         self.update_window_title()
     
+    def _has_translation_text(self, entry) -> bool:
+        """True si la entrada ya tiene texto traducido, aunque esté marcada fuzzy."""
+        if entry.msgid_plural:
+            return any(str(value or "").strip() for value in entry.msgstr_plural.values())
+        return bool(str(entry.msgstr or "").strip())
+
+    def _build_translator_chain(self) -> List[Tuple[str, object, Optional[int]]]:
+        """Motores en orden: DeepL (si hay clave), Google y MyMemory."""
+        chain = []
+        deepl_key = self.deepl_key_var.get().strip()
+        if deepl_key:
+            source = self.engine_lang_codes["deepl"].get(self.source_lang)
+            target = self.engine_lang_codes["deepl"].get(self.target_lang)
+            if source and target:
+                try:
+                    chain.append((
+                        "DeepL",
+                        DeeplTranslator(
+                            api_key=deepl_key,
+                            source=source,
+                            target=target,
+                            use_free_api=deepl_key.endswith(":fx"),
+                        ),
+                        None,
+                    ))
+                except Exception as e:
+                    print(f"DeepL no disponible: {e}")
+
+        source = self.engine_lang_codes["google"].get(self.source_lang)
+        target = self.engine_lang_codes["google"].get(self.target_lang)
+        if source and target:
+            try:
+                chain.append(("Google", GoogleTranslator(source=source, target=target), 5000))
+            except Exception as e:
+                print(f"Google no disponible: {e}")
+
+        source = self.engine_lang_codes["mymemory"].get(self.source_lang)
+        target = self.engine_lang_codes["mymemory"].get(self.target_lang)
+        if source and target:
+            try:
+                chain.append(("MyMemory", MyMemoryTranslator(source=source, target=target), 500))
+            except Exception as e:
+                print(f"MyMemory no disponible: {e}")
+        return chain
+
+    def _translate_text(self, text: str, chain, disabled: set) -> Tuple[str, str]:
+        """Traduce un texto con el primer motor que responda."""
+        errors = []
+        for name, translator, limit in chain:
+            if name in disabled:
+                continue
+            if limit is not None and len(text) > limit:
+                errors.append(f"{name}: el texto supera {limit} caracteres")
+                continue
+            try:
+                translated = translator.translate(text)
+                if not translated or not str(translated).strip():
+                    raise RuntimeError("respuesta vacía")
+                return str(translated), name
+            except Exception as e:
+                errors.append(f"{name}: {e}")
+                message = str(e).lower()
+                if "too many requests" in message or "429" in message:
+                    disabled.add(name)
+        detail = "\n".join(errors) if errors else "No hay ningún motor disponible para este par de idiomas."
+        raise RuntimeError(detail)
+
+    def _store_translation(self, entry, singular: str, plural: Optional[str] = None):
+        """Guarda una traducción. En plurales rellena msgstr_plural, no msgstr."""
+        singular = str(singular or "")
+        if entry.msgid_plural:
+            entry.msgstr = ""
+            if not entry.msgstr_plural:
+                entry.msgstr_plural[0] = singular
+                entry.msgstr_plural[1] = str(plural or "")
+                return
+            for idx in list(entry.msgstr_plural.keys()):
+                if idx == 0:
+                    entry.msgstr_plural[idx] = singular
+                else:
+                    entry.msgstr_plural[idx] = str(plural if plural is not None else singular)
+        else:
+            entry.msgstr = singular
+
+    def _format_translation_for_editor(self, entry, singular: str, plural: Optional[str] = None) -> str:
+        """Texto que el editor espera en el cuadro de traducción."""
+        if not entry.msgid_plural:
+            return str(singular or "")
+        lines = [f"[0]: {singular or ''}"]
+        lines.append(f"[1]: {plural or ''}")
+        for idx in sorted(entry.msgstr_plural.keys()):
+            if idx not in (0, 1):
+                lines.append(f"[{idx}]: {entry.msgstr_plural.get(idx, '')}")
+        return "\n".join(lines)
+
     def translate_current(self):
-        """Traduce la entrada actual usando DeepL o Google"""
+        """Traduce la entrada actual"""
         if self.current_entry_index is None:
             messagebox.showwarning("Advertencia", "No hay entrada seleccionada.")
             return
@@ -1061,44 +1160,30 @@ class POEditorGUI:
         
         def translate_thread():
             try:
-                # Intentar DeepL primero
-                deepl_key = self.deepl_key_var.get().strip()
-                translator = None
-                
-                if deepl_key:
-                    try:
-                        translator = DeeplTranslator(api_key=deepl_key, source=self.source_lang, target=self.target_lang)
-                    except:
-                        pass
-                
-                if not translator:
-                    try:
-                        translator = DeeplTranslator(source=self.source_lang, target=self.target_lang, use_free_api=True)
-                    except:
-                        pass
-                
-                if not translator:
-                    translator = GoogleTranslator(source=self.source_lang, target=self.target_lang)
-                
-                translated = translator.translate(text_to_translate)
-                
-                # Obtener el índice actual antes de actualizar
+                chain = self._build_translator_chain()
+                disabled = set()
+                singular, engine = self._translate_text(text_to_translate, chain, disabled)
+                plural = None
+                if entry.msgid_plural:
+                    plural, plural_engine = self._translate_text(entry.msgid_plural, chain, disabled)
+                    engine = plural_engine
+                translated_text = self._format_translation_for_editor(entry, singular, plural)
                 current_idx = self.current_entry_index
-                
-                # Actualizar en el hilo principal
-                translated_text = str(translated) if translated else ""
-                self.root.after(0, lambda t=translated_text: self.msgstr_text.delete(1.0, tk.END))
-                self.root.after(0, lambda t=translated_text: self.msgstr_text.insert(1.0, t) if t else None)
-                self.root.after(0, self.on_translation_changed)
-                
-                # Marcar como "a revisar" solo si la traducción tiene contenido
-                if translated_text and translated_text.strip():
-                    self.root.after(0, lambda idx=current_idx: self._mark_entry_for_review(idx))
-                
-                self.root.after(0, lambda: self.status_bar.config(text="Traducción completada"))
-                # on_translation_changed ya marca como cambios sin guardar
+
+                def apply_translation():
+                    self.msgstr_text.delete(1.0, tk.END)
+                    if translated_text:
+                        self.msgstr_text.insert(1.0, translated_text)
+                    self.on_translation_changed()
+                    if translated_text.strip():
+                        self._mark_entry_for_review(current_idx)
+                    self.status_bar.config(text=f"Traducción completada ({engine})")
+
+                self.root.after(0, apply_translation)
             except Exception as e:
-                messagebox.showerror("Error", f"Error al traducir:\n{str(e)}")
+                error_text = str(e)
+                self.root.after(0, lambda: messagebox.showerror("Error", f"Error al traducir:\n{error_text}"))
+                self.root.after(0, lambda: self.status_bar.config(text="Error al traducir"))
             finally:
                 self.is_processing = False
         
@@ -1441,8 +1526,9 @@ class POEditorGUI:
         
         response = messagebox.askyesno(
             "Confirmar",
-            f"¿Pretraducir todas las entradas sin traducir?\n\n"
-            f"Esto puede tardar varios minutos dependiendo del número de entradas."
+            "¿Pretraducir las entradas que todavía no tienen texto?\n\n"
+            "Las que ya tienen traducción, incluidas las fuzzy, no se modifican.\n"
+            "Puede tardar varios minutos."
         )
         if not response:
             return
@@ -1456,53 +1542,41 @@ class POEditorGUI:
     def _pretranslate_all_thread(self):
         """Hilo para pretraducir todas las entradas"""
         try:
-            # Inicializar traductor
-            deepl_key = self.deepl_key_var.get().strip()
-            translator = None
-            
-            if deepl_key:
-                try:
-                    translator = DeeplTranslator(api_key=deepl_key, source=self.source_lang, target=self.target_lang)
-                except:
-                    pass
-            
-            if not translator:
-                try:
-                    translator = DeeplTranslator(source=self.source_lang, target=self.target_lang, use_free_api=True)
-                except:
-                    pass
-            
-            if not translator:
-                translator = GoogleTranslator(source=self.source_lang, target=self.target_lang)
-            
+            chain = self._build_translator_chain()
+            if not chain:
+                raise RuntimeError(
+                    "No hay ningún motor disponible para este par de idiomas.\n"
+                    "Catalán no está disponible en DeepL con la versión instalada de deep-translator. "
+                    "Sin clave de DeepL se usan Google y, si Google bloquea la petición, MyMemory."
+                )
+            disabled = set()
+            engines_used = set()
             translated_count = 0
             error_count = 0
             
             for i, entry in enumerate(self.entries):
-                if not entry.translated() and entry.msgid:
-                    try:
-                        translated = translator.translate(entry.msgid)
-                        # Asegurar que msgstr siempre sea un string válido
-                        translated_str = str(translated) if translated is not None else ""
-                        
-                        # Solo asignar y marcar como "a revisar" si la traducción tiene contenido
-                        if translated_str and translated_str.strip():
-                            entry.msgstr = translated_str
-                            
-                            # Marcar como "a revisar"
-                            if i not in self.entry_metadata:
-                                self.entry_metadata[i] = {}
-                            self.entry_metadata[i]['needs_review'] = True
-                            
-                            translated_count += 1
-                        
-                        # Actualizar progreso cada 10 entradas
-                        if translated_count % 10 == 0:
-                            self.root.after(0, lambda: self.status_bar.config(
-                                text=f"Pretraduciendo... {translated_count} traducidas"))
-                    except Exception as e:
-                        error_count += 1
-                        print(f"Error traduciendo entrada {i}: {str(e)}")
+                if self._has_translation_text(entry) or not entry.msgid:
+                    continue
+                try:
+                    singular, engine = self._translate_text(entry.msgid, chain, disabled)
+                    plural = None
+                    if entry.msgid_plural:
+                        plural, plural_engine = self._translate_text(entry.msgid_plural, chain, disabled)
+                        engines_used.add(plural_engine)
+                    if singular and singular.strip():
+                        self._store_translation(entry, singular, plural)
+                        engines_used.add(engine)
+                        if i not in self.entry_metadata:
+                            self.entry_metadata[i] = {}
+                        self.entry_metadata[i]['needs_review'] = True
+                        translated_count += 1
+
+                    if translated_count and translated_count % 10 == 0:
+                        self.root.after(0, lambda count=translated_count: self.status_bar.config(
+                            text=f"Pretraduciendo... {count} traducidas"))
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error traduciendo entrada {i}: {str(e)}")
             
             self.root.after(0, self.update_entries_list)
             self.root.after(0, lambda: setattr(self, 'has_unsaved_changes', True))
@@ -1510,15 +1584,20 @@ class POEditorGUI:
             
             # Actualizar display de entrada actual si está seleccionada
             self.root.after(0, lambda: self._refresh_current_entry_display())
-            
-            self.root.after(0, lambda: self.status_bar.config(
-                text=f"Pretraducción completada: {translated_count} traducidas, {error_count} errores"))
-            self.root.after(0, lambda: messagebox.showinfo(
-                "Completado",
-                f"Pretraducción completada.\n{translated_count} entradas traducidas.\n{error_count} errores."))
+
+            engines_text = ", ".join(sorted(engines_used)) if engines_used else "ninguno"
+            summary = (
+                f"Pretraducción completada.\n{translated_count} entradas traducidas.\n"
+                f"{error_count} errores.\nMotores: {engines_text}"
+            )
+            status = f"Pretraducción completada: {translated_count} traducidas, {error_count} errores ({engines_text})"
+            self.root.after(0, lambda text=status: self.status_bar.config(text=text))
+            self.root.after(0, lambda text=summary: messagebox.showinfo("Completado", text))
         
         except Exception as e:
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Error durante la pretraducción:\n{str(e)}"))
+            error_text = str(e)
+            self.root.after(0, lambda msg=error_text: messagebox.showerror(
+                "Error", f"Error durante la pretraducción:\n{msg}"))
         finally:
             self.is_processing = False
     
